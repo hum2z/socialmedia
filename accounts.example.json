@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "accounts": [
+    {
+      "id": "ig_main",
+      "platform": "instagram",
+      "label": "Main brand Instagram",
+      "handle": "@brand",
+      "tags": ["brand", "en"],
+      "credentials": {
+        "igUserId": "17841400000000001",
+        "accessToken": "env:IG_MAIN_TOKEN"
+      }
+    },
+    {
+      "id": "ig_alt",
+      "platform": "instagram",
+      "label": "Second Instagram",
+      "handle": "@brand.studio",
+      "tags": ["personal"],
+      "credentials": {
+        "igUserId": "17841400000000002",
+        "accessToken": "env:IG_ALT_TOKEN"
+      }
+    },
+    {
+      "id": "yt_main",
+      "platform": "youtube",
+      "label": "Main channel",
+      "tags": ["brand", "longform"],
+      "credentials": {
+        "clientId": "env:YT_CLIENT_ID",
+        "clientSecret": "env:YT_CLIENT_SECRET",
+        "refreshToken": "env:YT_MAIN_REFRESH"
+      }
+    },
+    {
+      "id": "yt_alt",
+      "platform": "youtube",
+      "label": "Shorts channel",
+      "tags": ["personal", "shorts"],
+      "credentials": {
+        "clientId": "env:YT_CLIENT_ID",
+        "clientSecret": "env:YT_CLIENT_SECRET",
+        "refreshToken": "env:YT_ALT_REFRESH"
+      }
+    },
+    {
+      "id": "tt_main",
+      "platform": "tiktok",
+      "label": "Main TikTok",
+      "tags": ["brand"],
+      "credentials": {
+        "clientKey": "env:TT_CLIENT_KEY",
+        "clientSecret": "env:TT_CLIENT_SECRET",
+        "refreshToken": "env:TT_MAIN_REFRESH"
+      }
+    },
+    {
+      "id": "tt_alt",
+      "platform": "tiktok",
+      "label": "Second TikTok",
+      "tags": ["personal"],
+      "credentials": {
+        "clientKey": "env:TT_CLIENT_KEY",
+        "clientSecret": "env:TT_CLIENT_SECRET",
+        "refreshToken": "env:TT_ALT_REFRESH"
+      }
+    },
+    {
+      "id": "x_main",
+      "platform": "x",
+      "label": "Main X account",
+      "tags": ["brand"],
+      "credentials": {
+        "clientId": "env:X_CLIENT_ID",
+        "clientSecret": "env:X_CLIENT_SECRET",
+        "refreshToken": "env:X_MAIN_REFRESH"
+      }
+    },
+    {
+      "id": "x_alt",
+      "platform": "x",
+      "label": "Founder account",
+      "tags": ["personal"],
+      "credentials": {
+        "clientId": "env:X_CLIENT_ID",
+        "clientSecret": "env:X_CLIENT_SECRET",
+        "refreshToken": "env:X_ALT_REFRESH"
+      }
+    },
+    {
+      "id": "li_page",
+      "platform": "linkedin",
+      "label": "Company page",
+      "tags": ["brand"],
+      "credentials": {
+        "accessToken": "env:LI_TOKEN",
+        "authorUrn": "urn:li:organization:123456"
+      }
+    }
+  ],
+  "defaults": {
+    "targets": ["tag:brand"]
+  }
+}

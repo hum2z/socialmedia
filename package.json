@@ -1,0 +1,33 @@
+{
+  "name": "social-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for publishing to and analyzing multiple social media accounts across Instagram, YouTube, TikTok, X and LinkedIn.",
+  "type": "module",
+  "bin": {
+    "social-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "doctor": "node dist/index.js --doctor",
+    "prepare": "npm run build",
+    "test": "node test/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}
