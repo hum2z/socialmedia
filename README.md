@@ -479,3 +479,7 @@ test/
   every refresh. `--doctor` is the fastest way to find out.
 - `accounts.json` is written `0600` inside a `0700` directory, and is gitignored.
   It is still plaintext — prefer `env:` indirection for anything long-lived.
+
+## License
+
+[MIT](LICENSE) — use it, change it, ship it. Keep the copyright notice.

@@ -2,6 +2,7 @@
   "name": "social-mcp",
   "version": "0.1.0",
   "description": "MCP server for publishing to and analyzing multiple social media accounts across Instagram, YouTube, TikTok, X and LinkedIn.",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "social-mcp": "dist/index.js"
