@@ -1,9 +1,34 @@
 #!/usr/bin/env node
+import path from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./server.js";
 import { configPath, loadConfig, resolveTargets, updateSession } from "./config.js";
 import { adapterFor } from "./platforms/index.js";
 import { describeError } from "./util/errors.js";
+import { debug } from "./util/logger.js";
+
+/**
+ * Loads .env files so `env:VAR` credentials resolve without the launching
+ * client having to forward every secret. Node's loader never overwrites a
+ * variable that is already set, so a real environment variable always wins;
+ * within the files, the first one to define a name keeps it.
+ */
+function loadEnvFiles(): void {
+  const candidates = [
+    process.env.SOCIAL_MCP_ENV_FILE,
+    path.join(path.dirname(configPath()), ".env"),
+    path.join(process.cwd(), ".env"),
+  ].filter((p): p is string => Boolean(p));
+
+  for (const file of candidates) {
+    try {
+      process.loadEnvFile(file);
+      debug(`loaded env file ${file}`);
+    } catch {
+      // Absent or unreadable .env files are the normal case, not an error.
+    }
+  }
+}
 
 /**
  * Connectivity check that runs outside MCP, so credential problems can be
@@ -56,6 +81,8 @@ async function doctor(): Promise<number> {
 }
 
 async function main(): Promise<void> {
+  loadEnvFiles();
+
   if (process.argv.includes("--doctor")) {
     process.exit(await doctor());
   }

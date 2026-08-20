@@ -20,7 +20,9 @@
     "typecheck": "tsc --noEmit",
     "doctor": "node dist/index.js --doctor",
     "prepare": "npm run build",
-    "test": "node test/smoke.mjs"
+    "test": "node test/smoke.mjs && node test/adapters.mjs",
+    "test:tools": "node test/smoke.mjs",
+    "test:adapters": "node test/adapters.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
