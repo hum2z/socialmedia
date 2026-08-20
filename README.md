@@ -1,17 +1,53 @@
 # social-mcp
 
-An MCP server that lets Claude post to **many social accounts at once** and pull
-analytics back from each one — two Instagram accounts, two YouTube channels, two
-TikToks, two X accounts, a LinkedIn page, as many as you configure.
+Run all your social accounts through Claude — two Instagram accounts, two
+YouTube channels, two TikToks, two X accounts, a LinkedIn page, as many as you
+configure. Post to all of them at once, schedule for later, and pull the
+analytics back from each.
 
-It ships with a **Claude skill** (`.claude/skills/social-media/`) that teaches
-Claude the workflow: draft per platform, preview, confirm with you, publish, then
-follow the async ones until they land.
+Everything goes through the platforms' **official APIs**: no scraping, no
+browser automation, nothing that gets an account banned.
 
-Everything goes through the platforms' **official APIs**. That means real
-developer apps and real OAuth — see [setup](.claude/skills/social-media/references/setup.md)
-— but it also means nothing here breaks the moment a platform changes its HTML,
-and no account gets banned for automation.
+## Setup: paste one line into Claude
+
+You don't have to read the rest of this. Give Claude the link and let it do the
+work:
+
+> **Set up github.com/hum2z/socialmedia for me**
+
+Claude will clone the repo, build it, register the server with your Claude
+client, then walk you through connecting your accounts **one platform at a
+time** — telling you exactly which developer portal to open, which permissions
+to tick, and where to paste the token it gives you. It checks each account
+against the live API before moving to the next, so you find out immediately if
+something is wrong instead of the first time you try to post.
+
+Then you can just talk to it:
+
+> Post this to both my Instagram accounts and TikTok.
+
+If you already have credentials and want to add an account directly:
+
+> Add my main Instagram — user id 17841400000000001, token's in `$IG_MAIN_TOKEN`.
+
+Claude follows the [`social-setup` skill](.claude/skills/social-setup/SKILL.md)
+in this repo, so it knows the whole procedure and won't ask you to paste secrets
+into the chat.
+
+**Worth knowing before you start:** each platform needs its own developer app,
+and Instagram and TikTok both require app review before they'll post publicly.
+Claude will tell you this as it goes, but it's the reason setup takes an
+afternoon rather than five minutes. If you only want analytics and not posting,
+the requirements are much lighter.
+
+<details>
+<summary><b>Prefer to set it up yourself?</b></summary>
+
+Everything below is the manual path — install, credentials per platform,
+scheduling and the tool reference. Nothing here is required if you let Claude
+do it.
+
+</details>
 
 ## What it does
 
@@ -41,7 +77,7 @@ and no account gets banned for automation.
 Adding a platform means writing one adapter and registering it in
 `src/platforms/index.ts`.
 
-## Install
+## Manual install
 
 ```bash
 npm install
@@ -67,9 +103,13 @@ Or in `claude_desktop_config.json` / `.mcp.json`:
 }
 ```
 
-The skill in `.claude/skills/social-media/` loads automatically when this repo
-is your working directory. To use it anywhere, copy that folder to
-`~/.claude/skills/`.
+Two skills ship with this repo and load automatically when it is your working
+directory — copy them to `~/.claude/skills/` to use them anywhere:
+
+- **`social-setup`** — installs and configures everything, and walks you through
+  credentials one platform at a time.
+- **`social-media`** — the day-to-day workflow: draft per platform, preview,
+  confirm, publish, then follow the async posts until they land.
 
 The same binary also runs standalone:
 
@@ -81,6 +121,10 @@ node dist/index.js --run-due    # fire due posts once, then exit (for cron)
 ```
 
 ## Connect your accounts
+
+> Claude can do all of this for you — see [Setup](#setup-paste-one-line-into-claude).
+> What follows is the same procedure written out, for doing it by hand or for
+> checking Claude's work.
 
 Every platform here uses its **official API**, so each one needs a developer app
 and an authorized account. Budget an afternoon for the first setup — and note
@@ -454,9 +498,12 @@ src/
     base.ts          the adapter interface + generic validation
     instagram.ts youtube.ts tiktok.ts x.ts linkedin.ts
   util/              http (retry/backoff), media, errors, logging
-.claude/skills/social-media/
-  SKILL.md           the workflow Claude follows
-  references/        platform limits, credential setup, metric definitions
+CLAUDE.md            repo context + conventions, auto-loaded by Claude Code
+.claude/skills/
+  social-setup/      guided install and credential onboarding
+  social-media/
+    SKILL.md         the posting and analytics workflow
+    references/      platform limits, credential setup, metric definitions
 test/
   smoke.mjs          MCP tool layer, over a real stdio transport
   adapters.mjs       platform adapters against a mocked API surface
