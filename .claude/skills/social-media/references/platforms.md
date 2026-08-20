@@ -98,6 +98,21 @@ Hard limits the server enforces, plus the quirks that cause most failures.
   override with the `LINKEDIN_VERSION` env var when LinkedIn deprecates it.
 - The new post's URN comes back in the `x-restli-id` response header, not the body.
 
+## Scheduling support
+
+| Platform | Native (server-side) | Via the queue |
+|---|---|---|
+| YouTube | **yes** — `scheduledAt` in content, uploads private and self-publishes | yes |
+| Instagram | no | yes |
+| TikTok | no | yes |
+| X | no | yes |
+| LinkedIn | no | yes |
+
+Prefer YouTube's native scheduling: once the upload finishes, nothing of yours
+needs to be running. Everything else depends on `social-mcp --worker` (or a
+cron `--run-due`) being alive at the scheduled moment; otherwise the job is
+marked `missed` rather than published late.
+
 ## Choosing what to post where
 
 | Asset | Goes to |

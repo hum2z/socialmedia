@@ -1,6 +1,6 @@
 ---
 name: social-media
-description: Publish to and analyze multiple social media accounts (Instagram, YouTube, TikTok, X, LinkedIn) through the social-mcp server. Use when the user wants to post, schedule, or cross-post content to their accounts; compare performance across accounts or platforms; check followers, views or engagement; or read and reply to comments. Triggers on "post this to", "publish to my accounts", "cross-post", "how did my post do", "check my analytics", "compare my accounts", "reply to comments".
+description: Publish to and analyze multiple social media accounts (Instagram, YouTube, TikTok, X, LinkedIn) through the social-mcp server. Use when the user wants to post, schedule, or cross-post content to their accounts; queue posts for a future time or manage a posting schedule; compare performance across accounts or platforms; check followers, views or engagement; or read and reply to comments. Triggers on "post this to", "publish to my accounts", "cross-post", "schedule this for", "post it tomorrow at", "what's queued", "how did my post do", "check my analytics", "compare my accounts", "reply to comments".
 ---
 
 # Managing multiple social accounts
@@ -57,6 +57,36 @@ which accounts that means before using `all`.
 - `firstComment` — the "link in first comment" pattern.
 - `thread` — extra posts chained under the first (X only).
 
+## Scheduling
+
+`schedule_post` queues a post for later. It also requires `confirm: true`,
+because it commits to publishing while nobody is watching.
+
+**Always tell the user what has to be running.** An MCP server over stdio only
+lives while Claude is connected, so a post scheduled for tomorrow morning will
+not fire on its own unless `social-mcp --worker` is running in the background.
+The tool returns this warning on every scheduled job — pass it on the first time
+someone schedules anything, rather than letting them discover it from a
+`missed` job later. If they ask why a post did not go out, check
+`list_scheduled` for `missed` before assuming a credentials problem.
+
+**Be exact about time.** `scheduledFor` takes an ISO timestamp with an offset,
+a wall-clock time paired with an IANA `timezone`, or a relative offset like
+`+2h`. A bare time with no zone is read as the *server's* local zone, which is
+often not the user's — if they say "9am Friday", ask which zone, or supply one
+you already know. Every response echoes back how the time was interpreted in
+UTC; show that back to the user so a mistake is caught before it matters.
+
+**Prefer native scheduling for YouTube.** Passing `scheduledAt` inside the
+*content* uploads the video now as private and lets YouTube publish it on
+schedule, with nothing of the user's needing to run. That is strictly more
+reliable than the queue. No other platform here can do it.
+
+Use `list_scheduled` to show what is queued, `reschedule_post` to move
+something, and `cancel_scheduled` to drop it. A recurring `repeat` needs a
+`count` — recurrence is deliberately bounded, so if a user wants "every day
+forever", agree a number with them.
+
 ## Analytics
 
 `account_analytics` covers followers, reach and engagement over a date range
@@ -99,6 +129,12 @@ usual causes:
   The warning says so; relay it, because the user's post will be private.
 - **Rate limits** — Instagram allows 50 posts/24h (`check_account` reports what
   is left) and X's free tier allows 17/24h. Wait rather than retrying in a loop.
+- **A scheduled post shows `missed`** — nothing was running when it came due.
+  That is not a credentials failure; the fix is the worker, and the post needs
+  re-scheduling or posting now.
+- **A scheduled job is retrying** — every target failed and it will try again
+  with backoff. If some targets succeeded it is already done, and the accounts
+  that published will not be posted to twice.
 
 ## References
 

@@ -9,16 +9,28 @@ import {
   updateSession,
 } from "./config.js";
 import { adapterFor, ADAPTERS } from "./platforms/index.js";
-import { checkCapabilities, defaultRange } from "./platforms/base.js";
+import { defaultRange } from "./platforms/base.js";
 import type { AdapterContext } from "./platforms/base.js";
+import {
+  describePlan,
+  errorsOf,
+  executePublish,
+  prepareTargets,
+  warningsOf,
+} from "./publish.js";
+import { runDueJobs } from "./scheduler/runner.js";
+import {
+  dueAt,
+  isTerminal,
+  newJob,
+  saveQueue,
+  withQueueLock,
+  queuePath,
+  type ScheduledJob,
+} from "./scheduler/store.js";
+import { relativeToNow, resolveWhen } from "./scheduler/time.js";
 import { PLATFORMS } from "./types.js";
-import type {
-  Account,
-  Platform,
-  PostContent,
-  PublishResult,
-  ValidationIssue,
-} from "./types.js";
+import type { Account, Platform, PostContent } from "./types.js";
 import { describeError } from "./util/errors.js";
 import { debug } from "./util/logger.js";
 
@@ -95,20 +107,6 @@ const targetsSchema = z
   .describe(
     'Account selectors: an account id ("ig_main"), a platform ("instagram"), "tag:<name>", or "all".',
   );
-
-function mergeContent(base: PostContent, override?: Partial<PostContent>): PostContent {
-  if (!override) return base;
-  return { ...base, ...override };
-}
-
-/** Collects generic capability checks plus the adapter's own rules. */
-function validateFor(account: Account, content: PostContent): ValidationIssue[] {
-  const adapter = adapterFor(account.platform);
-  return [
-    ...checkCapabilities(adapter, content),
-    ...(adapter.validate?.(content, account) ?? []),
-  ];
-}
 
 export function createServer(): McpServer {
   const server = new McpServer({
@@ -224,31 +222,28 @@ export function createServer(): McpServer {
     async ({ targets, content, overrides }) => {
       try {
         const config = await loadConfig();
-        const accounts = resolveTargets(config, targets);
-        const plan = accounts.map((account) => {
-          const merged = mergeContent(
-            mergeContent(content as PostContent, overrides?.[account.platform]),
-            overrides?.[account.id],
-          );
-          const issues = validateFor(account, merged);
-          return {
-            accountId: account.id,
-            platform: account.platform,
-            handle: account.handle,
-            wouldPost: {
-              title: merged.topic,
-              text: merged.description,
-              hashtags: merged.hashtags ?? [],
-              mediaCount: merged.media?.length ?? 0,
-              firstComment: merged.firstComment,
-              threadLength: merged.thread?.length ?? 0,
-              privacy: merged.privacy ?? "public",
-              scheduledAt: merged.scheduledAt,
-            },
-            errors: issues.filter((i) => i.level === "error"),
-            warnings: issues.filter((i) => i.level === "warning"),
-          };
-        });
+        const plan = prepareTargets(
+          config,
+          targets,
+          content as PostContent,
+          overrides,
+        ).map((t) => ({
+          accountId: t.account.id,
+          platform: t.account.platform,
+          handle: t.account.handle,
+          wouldPost: {
+            title: t.content.topic,
+            text: t.content.description,
+            hashtags: t.content.hashtags ?? [],
+            mediaCount: t.content.media?.length ?? 0,
+            firstComment: t.content.firstComment,
+            threadLength: t.content.thread?.length ?? 0,
+            privacy: t.content.privacy ?? "public",
+            scheduledAt: t.content.scheduledAt,
+          },
+          errors: errorsOf(t),
+          warnings: warningsOf(t),
+        }));
 
         const blocking = plan.filter((p) => p.errors.length);
         return reply(
@@ -295,76 +290,25 @@ export function createServer(): McpServer {
     async ({ targets, content, overrides, confirm, skipInvalid }) => {
       try {
         const config = await loadConfig();
-        const accounts = resolveTargets(config, targets);
-
-        const prepared = accounts.map((account) => {
-          const merged = mergeContent(
-            mergeContent(content as PostContent, overrides?.[account.platform]),
-            overrides?.[account.id],
-          );
-          return { account, content: merged, issues: validateFor(account, merged) };
-        });
+        const prepared = prepareTargets(
+          config,
+          targets,
+          content as PostContent,
+          overrides,
+        );
 
         if (!confirm) {
           return reply(
             {
               published: false,
               reason: "confirm was not true — nothing was posted.",
-              plan: prepared.map((p) => ({
-                accountId: p.account.id,
-                platform: p.account.platform,
-                handle: p.account.handle,
-                title: p.content.topic,
-                text: p.content.description,
-                mediaCount: p.content.media?.length ?? 0,
-                errors: p.issues.filter((i) => i.level === "error"),
-                warnings: p.issues.filter((i) => i.level === "warning"),
-              })),
+              plan: describePlan(prepared),
             },
             `Dry run for ${prepared.length} target(s). Re-send with confirm: true to publish.`,
           );
         }
 
-        const results: PublishResult[] = [];
-        for (const { account, content: merged, issues } of prepared) {
-          const errors = issues.filter((i) => i.level === "error");
-          if (errors.length) {
-            if (!skipInvalid) {
-              return failure(
-                new Error(
-                  `${account.id} failed validation: ${errors.map((e) => e.message).join("; ")}`,
-                ),
-              );
-            }
-            results.push({
-              accountId: account.id,
-              platform: account.platform,
-              status: "failed",
-              message: `Skipped — ${errors.map((e) => e.message).join("; ")}`,
-            });
-            continue;
-          }
-
-          try {
-            debug(`publishing to ${account.id}`);
-            const result = await adapterFor(account.platform).publish(ctx, account, merged);
-            const warnings = issues.filter((i) => i.level === "warning").map((w) => w.message);
-            results.push({
-              ...result,
-              warnings: [...(result.warnings ?? []), ...warnings].length
-                ? [...(result.warnings ?? []), ...warnings]
-                : undefined,
-            });
-          } catch (err) {
-            // One platform's failure must never abort the rest of the fan-out.
-            results.push({
-              accountId: account.id,
-              platform: account.platform,
-              status: "failed",
-              message: describeError(err),
-            });
-          }
-        }
+        const results = await executePublish(prepared, ctx, { skipInvalid });
 
         const ok = results.filter((r) => r.status === "published" || r.status === "scheduled");
         const pending = results.filter((r) => r.status === "processing");
@@ -627,6 +571,358 @@ export function createServer(): McpServer {
         }
         await adapter.deletePost(ctx, account, postId);
         return reply({ deleted: true, accountId, postId }, "Post deleted.");
+      } catch (err) {
+        return failure(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "schedule_post",
+    {
+      title: "Schedule a post for later",
+      description:
+        "Queues a post to go out at a future time, to any set of accounts. Requires " +
+        "confirm: true, because it commits to publishing unattended. IMPORTANT: something " +
+        "must be running at the scheduled moment for it to fire — either this MCP server " +
+        "(which ticks while connected) or `social-mcp --worker` running in the background. " +
+        "A job whose time passes with nothing running is marked 'missed' rather than posted " +
+        "hours late. Validation runs now, at scheduling time, so problems surface immediately " +
+        "instead of silently at 3am.",
+      inputSchema: {
+        targets: targetsSchema,
+        content: contentSchema,
+        overrides: z
+          .record(z.string(), contentSchema.partial())
+          .optional()
+          .describe("Per-account or per-platform content overrides."),
+        scheduledFor: z
+          .string()
+          .describe(
+            'When to post. An ISO-8601 timestamp with an offset ("2026-09-01T15:00:00Z"), ' +
+              'a wall-clock time paired with `timezone` ("2026-09-01 15:00"), ' +
+              'or a relative offset ("+2h", "+30m", "+3d").',
+          ),
+        timezone: z
+          .string()
+          .optional()
+          .describe('IANA zone for a bare wall-clock time, e.g. "Europe/Berlin".'),
+        repeat: z
+          .object({
+            every: z.enum(["hour", "day", "week"]),
+            interval: z.number().int().min(1).default(1).describe("Fire every N units."),
+            count: z
+              .number()
+              .int()
+              .min(2)
+              .max(365)
+              .describe("Total number of runs, including the first. Required — a repeat cannot be open-ended."),
+          })
+          .optional()
+          .describe("Optional recurrence. Bounded by `count` so it can never run away."),
+        note: z.string().optional().describe("A reminder to yourself, shown in listings."),
+        maxAttempts: z
+          .number()
+          .int()
+          .min(1)
+          .max(5)
+          .default(3)
+          .describe("Retries if every target fails. Backs off 5, 10, 20 minutes."),
+        confirm: z.boolean().default(false).describe("Must be true to actually schedule."),
+      },
+    },
+    async ({ targets, content, overrides, scheduledFor, timezone, repeat, note, maxAttempts, confirm }) => {
+      try {
+        const when = resolveWhen(scheduledFor, timezone);
+        if (Date.parse(when.iso) <= Date.now()) {
+          return failure(
+            new Error(
+              `${when.interpretation} is in the past. Schedule a future time, or use the publish tool to post now.`,
+            ),
+          );
+        }
+
+        // Validate against the real accounts now, so a broken job never sits
+        // in the queue waiting to fail unattended.
+        const config = await loadConfig();
+        const prepared = prepareTargets(config, targets, content as PostContent, overrides);
+        const blocking = prepared.filter((t) => errorsOf(t).length);
+
+        if (blocking.length) {
+          return failure(
+            new Error(
+              `Not scheduled — ${blocking.length} target(s) fail validation: ` +
+                blocking
+                  .map((t) => `${t.account.id} (${errorsOf(t).map((e) => e.message).join("; ")})`)
+                  .join(" | "),
+            ),
+          );
+        }
+
+        if (!confirm) {
+          return reply(
+            {
+              scheduled: false,
+              wouldRunAt: when.iso,
+              interpretation: when.interpretation,
+              relative: relativeToNow(when.iso),
+              repeat,
+              plan: describePlan(prepared),
+              warnings: when.warnings,
+            },
+            `Dry run — would post to ${prepared.length} account(s) ${relativeToNow(when.iso)}. ` +
+              `Re-send with confirm: true to schedule.`,
+          );
+        }
+
+        const job = newJob({
+          scheduledFor: when.iso,
+          requestedTime: when.requested,
+          targets,
+          content: content as PostContent,
+          overrides,
+          maxAttempts,
+          repeat,
+          note,
+        });
+
+        await withQueueLock(async (queue) => {
+          queue.jobs.push(job);
+          await saveQueue(queue);
+        });
+
+        return reply(
+          {
+            scheduled: true,
+            id: job.id,
+            runsAt: job.scheduledFor,
+            interpretation: when.interpretation,
+            relative: relativeToNow(job.scheduledFor),
+            targets: prepared.map((t) => t.account.id),
+            repeat,
+            queueFile: queuePath(),
+            warnings: [
+              ...when.warnings,
+              "This fires only while the MCP server is connected or `social-mcp --worker` is running.",
+            ],
+          },
+          `Scheduled ${job.id} for ${job.scheduledFor} (${relativeToNow(job.scheduledFor)}).`,
+        );
+      } catch (err) {
+        return failure(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_scheduled",
+    {
+      title: "List scheduled posts",
+      description:
+        "Shows the scheduled-post queue: what is pending, what already ran, what failed, " +
+        "and what was missed because nothing was running when it came due.",
+      inputSchema: {
+        status: z
+          .enum(["pending", "running", "done", "failed", "cancelled", "missed", "all"])
+          .default("pending"),
+        limit: z.number().int().min(1).max(100).default(25),
+      },
+    },
+    async ({ status, limit }) => {
+      try {
+        const queue = await withQueueLock((q) => q);
+        const now = Date.now();
+        const jobs = queue.jobs
+          .filter((j) => status === "all" || j.status === status)
+          .sort((a, b) => dueAt(a) - dueAt(b))
+          .slice(0, limit)
+          .map((j) => ({
+            id: j.id,
+            status: j.status,
+            runsAt: j.nextAttemptAt ?? j.scheduledFor,
+            relative: relativeToNow(j.nextAttemptAt ?? j.scheduledFor, now),
+            targets: j.targets,
+            title: j.content.topic,
+            text: j.content.description?.slice(0, 120),
+            repeat: j.repeat ? { ...j.repeat, completed: j.runCount ?? 0 } : undefined,
+            attempts: `${j.attempts}/${j.maxAttempts}`,
+            note: j.note,
+            lastError: j.lastError,
+            results: j.results?.map((r) => ({
+              accountId: r.accountId,
+              status: r.status,
+              url: r.url,
+              message: r.message,
+            })),
+          }));
+
+        const counts = queue.jobs.reduce<Record<string, number>>((acc, j) => {
+          acc[j.status] = (acc[j.status] ?? 0) + 1;
+          return acc;
+        }, {});
+
+        return reply(
+          { queueFile: queuePath(), counts, shown: jobs.length, jobs },
+          jobs.length
+            ? `${jobs.length} ${status} job(s).`
+            : `No ${status} jobs in the queue.`,
+        );
+      } catch (err) {
+        return failure(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "cancel_scheduled",
+    {
+      title: "Cancel a scheduled post",
+      description:
+        "Cancels a queued post so it never fires. Already-published posts are unaffected — " +
+        "use delete_post for those.",
+      inputSchema: {
+        id: z.string().describe("The job id from schedule_post or list_scheduled."),
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ id, confirm }) => {
+      try {
+        const result = await withQueueLock(async (queue) => {
+          const job = queue.jobs.find((j) => j.id === id);
+          if (!job) return { error: `No scheduled job with id "${id}".` };
+          if (isTerminal(job.status)) {
+            return { error: `Job ${id} already finished with status "${job.status}"; there is nothing to cancel.` };
+          }
+          if (!confirm) {
+            return {
+              preview: {
+                id,
+                runsAt: job.scheduledFor,
+                targets: job.targets,
+                title: job.content.topic,
+              },
+            };
+          }
+          job.status = "cancelled";
+          job.finishedAt = new Date().toISOString();
+          delete job.lock;
+          await saveQueue(queue);
+          return { cancelled: true };
+        });
+
+        if ("error" in result && result.error) return failure(new Error(result.error));
+        if ("preview" in result) {
+          return reply(
+            { cancelled: false, ...result.preview },
+            "Dry run — re-send with confirm: true to cancel.",
+          );
+        }
+        return reply({ cancelled: true, id }, `Cancelled ${id}.`);
+      } catch (err) {
+        return failure(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "reschedule_post",
+    {
+      title: "Move a scheduled post",
+      description: "Changes when a queued post fires, without rebuilding it.",
+      inputSchema: {
+        id: z.string(),
+        scheduledFor: z.string().describe("Same formats as schedule_post."),
+        timezone: z.string().optional(),
+      },
+    },
+    async ({ id, scheduledFor, timezone }) => {
+      try {
+        const when = resolveWhen(scheduledFor, timezone);
+        if (Date.parse(when.iso) <= Date.now()) {
+          return failure(new Error(`${when.interpretation} is in the past.`));
+        }
+
+        const result = await withQueueLock(async (queue) => {
+          const job = queue.jobs.find((j) => j.id === id);
+          if (!job) return { error: `No scheduled job with id "${id}".` };
+          if (isTerminal(job.status)) {
+            return { error: `Job ${id} already finished with status "${job.status}".` };
+          }
+          const previous = job.scheduledFor;
+          job.scheduledFor = when.iso;
+          delete job.nextAttemptAt;
+          job.status = "pending";
+          await saveQueue(queue);
+          return { previous };
+        });
+
+        if ("error" in result && result.error) return failure(new Error(result.error));
+        return reply(
+          {
+            id,
+            movedFrom: (result as { previous: string }).previous,
+            runsAt: when.iso,
+            relative: relativeToNow(when.iso),
+            warnings: when.warnings,
+          },
+          `${id} now runs at ${when.iso} (${relativeToNow(when.iso)}).`,
+        );
+      } catch (err) {
+        return failure(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "run_due_posts",
+    {
+      title: "Fire due scheduled posts now",
+      description:
+        "Publishes every queued post whose time has arrived. The server does this " +
+        "automatically on a timer while it is connected, so this is for forcing a check — " +
+        "after starting up, or to flush something due moments ago. Requires confirm: true " +
+        "because it publishes.",
+      inputSchema: {
+        confirm: z.boolean().default(false),
+      },
+    },
+    async ({ confirm }) => {
+      try {
+        const now = Date.now();
+        if (!confirm) {
+          const queue = await withQueueLock((q) => q);
+          const due = queue.jobs.filter(
+            (j) => !isTerminal(j.status) && dueAt(j) <= now,
+          );
+          return reply(
+            {
+              executed: false,
+              dueNow: due.map((j) => ({
+                id: j.id,
+                runsAt: j.scheduledFor,
+                targets: j.targets,
+                title: j.content.topic,
+              })),
+            },
+            due.length
+              ? `${due.length} job(s) are due. Re-send with confirm: true to publish them.`
+              : "Nothing is due right now.",
+          );
+        }
+
+        const tick = await runDueJobs(ctx, { now });
+        // `tick` carries its own `ran` array, so the flag is named separately.
+        const parts = [
+          tick.ran.length ? `${tick.ran.length} published` : "",
+          tick.retrying.length ? `${tick.retrying.length} will retry` : "",
+          tick.failed.length ? `${tick.failed.length} failed` : "",
+          tick.missed.length ? `${tick.missed.length} missed their window` : "",
+        ].filter(Boolean);
+
+        return reply(
+          { executed: true, ...tick },
+          parts.length ? parts.join(", ") + "." : "Nothing was due.",
+        );
       } catch (err) {
         return failure(err);
       }

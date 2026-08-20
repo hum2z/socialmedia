@@ -22,6 +22,8 @@ and no account gets banned for automation.
   platform (`instagram`), by tag (`tag:brand`), or `all`.
 - **Analytics** for every account in one call, with a date range and a per-day
   series where the platform offers one.
+- **Schedule posts** for a future time, with timezone handling, retries and
+  bounded recurrence — see [Scheduling](#scheduling) for what has to be running.
 - **Comments** — read them, reply to them.
 - **Never posts by accident.** `publish`, `reply_to_comment` and `delete_post`
   all require `confirm: true`; without it you get a dry run.
@@ -68,6 +70,15 @@ Or in `claude_desktop_config.json` / `.mcp.json`:
 The skill in `.claude/skills/social-media/` loads automatically when this repo
 is your working directory. To use it anywhere, copy that folder to
 `~/.claude/skills/`.
+
+The same binary also runs standalone:
+
+```bash
+node dist/index.js --help       # all modes and environment variables
+node dist/index.js --doctor     # verify credentials, show the scheduled queue
+node dist/index.js --worker     # run the scheduler in the background
+node dist/index.js --run-due    # fire due posts once, then exit (for cron)
+```
 
 ## Connect your accounts
 
@@ -251,6 +262,105 @@ better than after.
 - Revoke tokens from the platform's own settings page — removing an entry here
   only stops this server from using it.
 
+## Scheduling
+
+Queue a post for later:
+
+> Schedule this Reel for both Instagram accounts on Friday at 9am Berlin time.
+
+which calls `schedule_post`. Validation runs **at scheduling time**, so a post
+that could never succeed is refused immediately rather than failing silently at
+9am on Friday.
+
+### What has to be running
+
+This is the part worth understanding before you rely on it. An MCP server over
+stdio only exists while its client is connected — when you close Claude, the
+process ends. So a queued post needs something alive at the moment it comes due.
+There are three ways to get that, and you can mix them:
+
+| | Fires when | Best for |
+|---|---|---|
+| **The MCP server** | while Claude is connected | posts a few minutes/hours out, during a session |
+| **`--worker`** | always, once you start it | anything unattended — this is the real answer |
+| **`--run-due` from cron** | whenever cron fires it | machines that already run cron |
+
+Nothing is lost if none of them is running: a job whose time passes is marked
+**`missed`**, not published hours late. A 9am announcement landing at 6pm is
+usually worse than not landing, so the default catch-up window is 120 minutes
+(`SOCIAL_MCP_CATCH_UP_MINUTES`). `list_scheduled` and `--doctor` both show
+missed jobs, and `--doctor` warns when something is overdue with no worker up.
+
+### Running the worker
+
+```bash
+node dist/index.js --worker --interval 60
+```
+
+**systemd** (Linux) — `~/.config/systemd/user/social-mcp.service`:
+
+```ini
+[Unit]
+Description=social-mcp scheduler
+
+[Service]
+ExecStart=/usr/bin/node /path/to/socialmedia/dist/index.js --worker
+Restart=always
+Environment=SOCIAL_MCP_CONFIG=%h/.config/social-mcp/accounts.json
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now social-mcp
+```
+
+**launchd** (macOS) — `~/Library/LaunchAgents/social-mcp.plist` with
+`RunAtLoad` and `KeepAlive` set, pointing at the same command.
+
+**cron** — no daemon, just a periodic check:
+
+```cron
+*/5 * * * * /usr/bin/node /path/to/socialmedia/dist/index.js --run-due >> ~/.social-mcp.log 2>&1
+```
+
+Running the worker *and* having Claude connected is safe: the queue is guarded
+by a lock file, so exactly one of them claims each job.
+
+### Times and timezones
+
+`scheduledFor` accepts three forms:
+
+| Form | Example | Meaning |
+|---|---|---|
+| ISO with offset | `2026-09-01T15:00:00Z`, `…+02:00` | exact, unambiguous |
+| wall clock + `timezone` | `2026-09-01 15:00` + `Europe/Berlin` | resolved through that zone, DST included |
+| relative | `+2h`, `+30m`, `+3d` | from now |
+
+A bare time with no zone is read as the **server's** local time and returns a
+warning saying so — that is the mistake that posts at the wrong hour. Every
+response echoes back how the time was interpreted, in UTC, so it can be checked
+before it matters.
+
+### Retries, recurrence and failure
+
+- If **every** target fails, the job retries with backoff (5, 10, 20 minutes) up
+  to `maxAttempts`.
+- If **some** targets succeeded, the job is done — it never re-posts to an
+  account that already published.
+- `repeat` gives simple recurrence (`hour`/`day`/`week` × `interval`), and
+  requires a `count`, so a schedule can never run away.
+- A crashed worker leaves no job stuck: stale locks are reclaimed after 15
+  minutes and the job runs on the next tick.
+
+### Native scheduling
+
+YouTube can schedule server-side: pass `scheduledAt` in the **content** and the
+video uploads now as private and goes public by itself, with nothing of yours
+running. That is strictly more reliable than the queue, so prefer it for
+YouTube. No other platform here offers it.
+
 ## Using it
 
 Talk to Claude normally:
@@ -281,6 +391,11 @@ Under the hood that is `list_accounts` → `preview_post` → your go-ahead →
 | `list_comments` | comments on a post |
 | `reply_to_comment` | comment or reply (needs `confirm: true`) |
 | `delete_post` | remove a post (needs `confirm: true`) |
+| `schedule_post` | queue a post for later (needs `confirm: true`) |
+| `list_scheduled` | the queue: pending, done, failed, missed |
+| `cancel_scheduled` | drop a queued post (needs `confirm: true`) |
+| `reschedule_post` | move a queued post to a new time |
+| `run_due_posts` | force a check for due posts now |
 | `add_account` / `remove_account` | manage the registry |
 | `platform_capabilities` | limits and features per platform |
 
@@ -289,9 +404,10 @@ Under the hood that is `list_accounts` → `preview_post` → your go-ahead →
 ```bash
 npm run typecheck       # tsc --noEmit
 npm run build           # compile to dist/
-npm test                # both suites — 149 assertions, no credentials needed
+npm test                # all three suites — 233 assertions, no credentials needed
 npm run test:tools      # MCP tool layer only
 npm run test:adapters   # platform adapters only
+npm run test:scheduler  # queue, timezones, retries, locking
 SOCIAL_MCP_DEBUG=1 …    # request logging on stderr
 ```
 
@@ -309,6 +425,14 @@ X's INIT/APPEND/FINALIZE and thread chaining, LinkedIn's `x-restli-id` header,
 plus retry/backoff, `Retry-After`, and the degraded paths where a platform
 gates a metric.
 
+**`test/scheduler.mjs`** covers the queue end to end with publishing stubbed at
+the adapter boundary: timezone and DST conversion, the catch-up window, retry
+backoff, partial-success handling, bounded recurrence, reclaiming jobs from a
+crashed process, and two runners racing for the same job (exactly one wins). It
+also spawns a real `--worker` process and checks it survives past its first
+tick — a regression test for a bug where an unref'd timer made the worker exit
+immediately.
+
 That covers everything up to the network boundary. What it cannot prove is that
 the live platform accepts the request — only real credentials do that, which is
 what `--doctor` is for.
@@ -317,9 +441,14 @@ what `--doctor` is for.
 
 ```
 src/
-  index.ts           entry point + --doctor
+  index.ts           entry point: MCP server, --worker, --run-due, --doctor
   server.ts          MCP tool definitions
   config.ts          account registry, env: indirection, target resolution
+  publish.ts         shared publish path used by the tool and the scheduler
+  scheduler/
+    store.ts         persistent queue, file locking, recurrence
+    runner.ts        claims due jobs, retries, catch-up window
+    time.ts          timezone-aware time parsing
   types.ts           shared domain types
   platforms/
     base.ts          the adapter interface + generic validation
@@ -331,6 +460,7 @@ src/
 test/
   smoke.mjs          MCP tool layer, over a real stdio transport
   adapters.mjs       platform adapters against a mocked API surface
+  scheduler.mjs      queue, timezones, retries, locking, worker liveness
 ```
 
 ## Notes and limits
@@ -343,6 +473,8 @@ test/
   warns when that happens.
 - **TikTok exposes no comment API**, and **LinkedIn has no analytics for personal
   profiles**. Those return clear explanations, not empty results.
+- **Scheduled posts need a running process.** Use `--worker`; without it, posts
+  queued for when Claude is closed will be marked missed rather than published.
 - Tokens expire: Instagram at 60 days, LinkedIn at 60 days, TikTok rotates on
   every refresh. `--doctor` is the fastest way to find out.
 - `accounts.json` is written `0600` inside a `0700` directory, and is gitignored.

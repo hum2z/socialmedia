@@ -47,7 +47,8 @@ try {
     "list_accounts", "check_account", "preview_post", "publish",
     "get_publish_status", "account_analytics", "post_analytics", "list_posts",
     "list_comments", "reply_to_comment", "delete_post", "add_account",
-    "remove_account", "platform_capabilities",
+    "remove_account", "platform_capabilities", "schedule_post", "list_scheduled",
+    "cancel_scheduled", "reschedule_post", "run_due_posts",
   ]) {
     check(`${expected} is registered`, names.includes(expected));
   }
@@ -172,6 +173,64 @@ try {
   console.log("\nregistry mutation");
   const removed = json((await call("remove_account", { id: "li_page", confirm: true })).text);
   check("account removed", removed.removed === true && removed.remaining === 8);
+
+  console.log("\nscheduling");
+  const schedDry = json((await call("schedule_post", {
+    targets: ["x_main"], content: { description: "later" }, scheduledFor: "+2h",
+  })).text);
+  check("schedule_post without confirm does not queue", schedDry.scheduled === false);
+  check("dry run still resolves the time", Boolean(schedDry.wouldRunAt));
+
+  const scheduled = json((await call("schedule_post", {
+    targets: ["x_main", "x_alt"], content: { topic: "Launch", description: "body" },
+    scheduledFor: "2026-12-01 09:00", timezone: "Europe/Berlin", confirm: true,
+  })).text);
+  check("schedule_post with confirm queues the job", scheduled.scheduled === true);
+  check("the job gets an id", scheduled.id?.startsWith("sched_"));
+  check("the zone is applied (09:00 Berlin = 08:00Z in winter)",
+    scheduled.runsAt === "2026-12-01T08:00:00.000Z", scheduled.runsAt);
+  check("the user is told it needs something running",
+    scheduled.warnings.some((w) => w.includes("worker")));
+
+  const pastSchedule = await call("schedule_post", {
+    targets: ["x_main"], content: { description: "x" },
+    scheduledFor: "2020-01-01T00:00:00Z", confirm: true,
+  });
+  check("a past time is refused", pastSchedule.isError && pastSchedule.text.includes("past"));
+
+  const invalidSchedule = await call("schedule_post", {
+    targets: ["ig_main"], content: { description: "no media" },
+    scheduledFor: "+3h", confirm: true,
+  });
+  check("a job that would fail validation is refused up front",
+    invalidSchedule.isError && invalidSchedule.text.includes("fail validation"));
+
+  const listed2 = json((await call("list_scheduled", {})).text);
+  check("the queued job is listed", listed2.jobs.some((j) => j.id === scheduled.id));
+  check("listings show a relative time",
+    listed2.jobs.find((j) => j.id === scheduled.id).relative.length > 0);
+
+  const moved = json((await call("reschedule_post", {
+    id: scheduled.id, scheduledFor: "2026-12-02T10:00:00Z",
+  })).text);
+  check("reschedule moves the job", moved.runsAt === "2026-12-02T10:00:00.000Z");
+
+  const cancelDry = json((await call("cancel_scheduled", { id: scheduled.id })).text);
+  check("cancel without confirm does nothing", cancelDry.cancelled === false);
+  const cancelled = json((await call("cancel_scheduled", {
+    id: scheduled.id, confirm: true })).text);
+  check("cancel with confirm works", cancelled.cancelled === true);
+  const afterCancel = json((await call("list_scheduled", { status: "cancelled" })).text);
+  check("the job shows as cancelled",
+    afterCancel.jobs.some((j) => j.id === scheduled.id));
+  const recancel = await call("cancel_scheduled", { id: scheduled.id, confirm: true });
+  check("cancelling twice is refused clearly",
+    recancel.isError && recancel.text.includes("already finished"));
+  const ghost = await call("cancel_scheduled", { id: "sched_nope", confirm: true });
+  check("cancelling an unknown id is refused", ghost.isError);
+
+  const due = json((await call("run_due_posts", {})).text);
+  check("run_due_posts without confirm does not publish", due.executed === false);
 
   console.log("\ncredential resolution");
   const check1 = json((await call("check_account", { targets: ["ig_main"] })).text);
